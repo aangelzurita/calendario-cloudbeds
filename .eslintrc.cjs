@@ -1,4 +1,3 @@
-/** Deshabilita reglas que están rompiendo el build en Vercel */
 module.exports = {
   root: true,
   rules: {
