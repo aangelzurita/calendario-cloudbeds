@@ -1,88 +1,185 @@
 import { NextResponse } from "next/server";
+import { getCloudbedsAccessToken } from "@/lib/cloudbedsAuth";
 
 const CLOUDBEDS_API = "https://api.cloudbeds.com/api/v1.3";
 
-// Mapea aquí tus propiedades Aguamiel
-const PROPERTIES = {
-  lapunta: {
-    name: "Aguamiel La Punta",
-    token: process.env.CLOUDBEDS_TOKEN_LAPUNTA,
-  },
-  aguablanca: {
-    name: "Aguamiel Agua Blanca",
-    token: process.env.CLOUDBEDS_TOKEN_AGUABLANCA,
-  },
-  esmeralda: {
-    name: "Aguamiel Esmeralda",
-    token: process.env.CLOUDBEDS_TOKEN_ESMERALDA,
-  },
-};
+const PROPERTY_NAMES = {
+  lapunta: "Aguamiel La Punta",
+  aguablanca: "Aguamiel Agua Blanca",
+  esmeralda: "Aguamiel Esmeralda",
+} as const;
+
+type PropertyId = keyof typeof PROPERTY_NAMES;
+
+// ====== helpers fecha ======
+function addDays(date: Date, n: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
+}
+
+function fmt(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
+function getDateRange(start: Date, end: Date) {
+  const days: Date[] = [];
+  for (let d = new Date(start); d <= end; d = addDays(d, 1)) {
+    days.push(new Date(d));
+  }
+  return days;
+}
+
+// ====== mapLimit (concurrencia controlada) ======
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, idx: number) => Promise<R>
+) {
+  const results: R[] = [];
+  let i = 0;
+
+  const workers = new Array(limit).fill(null).map(async () => {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+// ====== cache simple en memoria ======
+// OJO: funciona perfecto en dev y en servidores únicos.
+// En Vercel multi-instancia se comporta como “best effort”.
+const CACHE = new Map<string, { expires: number; payload: any }>();
+const TTL_MS = 1000 * 60 * 10; // 10 min
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
-  const startDate = searchParams.get("startDate");
-  const endDate = searchParams.get("endDate");
+  const startDateStr = searchParams.get("startDate");
+  const endDateStr = searchParams.get("endDate");
   const adults = searchParams.get("adults") || "2";
+  const stayNights = Number(searchParams.get("nights") || "2"); // por si luego quieres ajustar
 
-  if (!startDate || !endDate) {
+  if (!startDateStr || !endDateStr) {
     return NextResponse.json(
       { success: false, message: "Missing startDate or endDate" },
       { status: 400 }
     );
   }
 
-  // Solo propiedades que tengan token configurado
-  const activeProps = Object.entries(PROPERTIES).filter(
-    ([, cfg]) => !!cfg.token
-  );
-
-  if (activeProps.length === 0) {
-    return NextResponse.json(
-      {
-        success: false,
-        message: "No Cloudbeds tokens configured for any property",
-      },
-      { status: 500 }
-    );
+  // ====== cache key por mes + adultos + noches ======
+  const cacheKey = `${startDateStr}_${endDateStr}_a${adults}_n${stayNights}`;
+  const cached = CACHE.get(cacheKey);
+  const now = Date.now();
+  if (cached && cached.expires > now) {
+    return NextResponse.json(cached.payload, { status: 200 });
   }
 
-  // Llamamos Cloudbeds por cada propiedad
-  const results = await Promise.all(
-    activeProps.map(async ([id, cfg]) => {
-      try {
-        const url = `${CLOUDBEDS_API}/getAvailableRoomTypes?startDate=${startDate}&endDate=${endDate}&adults=${adults}`;
+  const start = new Date(startDateStr);
+  const end = new Date(endDateStr);
+  const dayList = getDateRange(start, end);
 
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${cfg.token}` },
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  // solo días futuros se consultan
+  const futureDays = dayList.filter((d) => {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    return x > today;
+  });
+
+  const propertyIds: PropertyId[] = ["lapunta", "aguablanca", "esmeralda"];
+
+  const results = await Promise.all(
+    propertyIds.map(async (pid) => {
+      try {
+        const token = await getCloudbedsAccessToken(pid);
+
+        // inicializa todo vendible
+        const availabilityByDay: boolean[] = Array(dayList.length).fill(true);
+
+        // si no hay futuros, no consultamos nada
+        if (futureDays.length === 0) {
+          return {
+            id: pid,
+            name: PROPERTY_NAMES[pid],
+            success: true,
+            availability: availabilityByDay,
+            error: null,
+          };
+        }
+
+        // hacemos consultas futuras con concurrencia controlada
+        const futureResults = await mapLimit(
+          futureDays,
+          5, // 👈 5 requests simultáneos por propiedad (ajustable)
+          async (day) => {
+            const sd = fmt(day);
+            const ed = fmt(addDays(day, stayNights));
+            const url = `${CLOUDBEDS_API}/getAvailableRoomTypes?startDate=${sd}&endDate=${ed}&adults=${adults}`;
+
+            const res = await fetch(url, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            const json = await res.json();
+
+            if (!json.success || !json.data?.[0]?.propertyRooms) {
+              return { day, vendible: true }; // fallback SAFE
+            }
+
+            const rooms = json.data[0].propertyRooms;
+            const vendible = rooms.some(
+              (r: any) =>
+                r.roomsAvailable !== undefined &&
+                Number(r.roomsAvailable) > 0
+            );
+
+            return { day, vendible };
+          }
+        );
+
+        // mete resultados futuros en el array general
+        futureResults.forEach(({ day, vendible }) => {
+          const idx = Math.floor(
+            (new Date(day).getTime() - start.getTime()) / (1000 * 60 * 60 * 24)
+          );
+          if (idx >= 0 && idx < availabilityByDay.length) {
+            availabilityByDay[idx] = vendible;
+          }
         });
 
-        const json = await res.json();
-
         return {
-          id,
-          name: cfg.name,
-          success: json.success === true,
-          data: json.data || null,
-          error: json.success ? null : json.message || null,
+          id: pid,
+          name: PROPERTY_NAMES[pid],
+          success: true,
+          availability: availabilityByDay,
+          error: null,
         };
-      } catch (error: any) {
+      } catch (e: any) {
         return {
-          id,
-          name: cfg.name,
+          id: pid,
+          name: PROPERTY_NAMES[pid],
           success: false,
-          data: null,
-          error: error.message || "Request failed",
+          availability: [],
+          error: e?.message || "Request failed",
         };
       }
     })
   );
 
-  return NextResponse.json(
-    {
-      success: true,
-      properties: results,
-    },
-    { status: 200 }
-  );
+  const payload = { success: true, properties: results };
+
+  CACHE.set(cacheKey, {
+    expires: now + TTL_MS,
+    payload,
+  });
+
+  return NextResponse.json(payload, { status: 200 });
 }

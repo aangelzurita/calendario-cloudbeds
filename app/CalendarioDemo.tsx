@@ -25,8 +25,8 @@ type AvailabilityProperty = {
   id: string;
   name: string;
   success: boolean;
-  data?: any[]; // /availability
-  reservations?: any[]; // /reservations
+  data?: any[]; // ya no se usa, pero lo dejamos por compatibilidad
+  reservations?: any[];
   error?: string | null;
 };
 
@@ -65,11 +65,55 @@ function getMonthMatrix(year: number, month: number) {
   return matrix;
 }
 
+// ==== Helpers nuevos ====
+
+// 1) Mezcla propiedades del API con las estáticas (siempre visibles)
+function mergeWithStatic(propsApi: AvailabilityProperty[]) {
+  const mapApi = new Map(propsApi.map((p) => [p.id, p]));
+
+  const merged: AvailabilityProperty[] = STATIC_PROPERTIES.map((sp) => {
+    const apiP = mapApi.get(sp.id);
+    return apiP
+      ? { ...apiP, name: sp.name }
+      : { id: sp.id, name: sp.name, success: true, reservations: [] };
+  });
+
+  propsApi.forEach((p) => {
+    if (!STATIC_PROPERTIES.find((s) => s.id === p.id)) merged.push(p);
+  });
+
+  return merged;
+}
+
+// 2) Color estable por id (no depende del orden del API)
+function colorForId(id: string) {
+  const idx = STATIC_PROPERTIES.findIndex((p) => p.id === id);
+  if (idx >= 0) return COLOR_POOL[idx % COLOR_POOL.length];
+
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) % 997;
+  }
+  return COLOR_POOL[hash % COLOR_POOL.length];
+}
+
+// Formato YYYY-MM-DD
+function fmt(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+// ✅ LOGOUT SIMPLE (borra cookie server-side)
+async function logout() {
+  await fetch("/api/logout", { method: "POST" });
+  window.location.href = "/login";
+}
+
 export default function CalendarioDemo() {
   const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
 
-  // En vez de manejar año/mes separados (que te estaba dando el salto raro),
-  // usamos UNA sola fecha anclada al día 1 del mes actual.
+  // Fecha anclada al día 1 del mes actual
   const [currentDate, setCurrentDate] = useState(
     new Date(hoy.getFullYear(), hoy.getMonth(), 1)
   );
@@ -77,7 +121,6 @@ export default function CalendarioDemo() {
   const currentYear = currentDate.getFullYear();
   const currentMonth = currentDate.getMonth();
 
-  const [mode, setMode] = useState<"availability" | "history">("availability");
   const [seleccion, setSeleccion] = useState<string>("ALL");
 
   const [loading, setLoading] = useState(true);
@@ -91,6 +134,11 @@ export default function CalendarioDemo() {
   // Ocupación: propertyId -> [bool por día]
   const [ocupacion, setOcupacion] = useState<Record<string, boolean[]>>({});
 
+  // ===== Modal detalle =====
+  const [selectedDay, setSelectedDay] = useState<Date | null>(null);
+  const [detalleDia, setDetalleDia] = useState<any[] | null>(null);
+  const [detalleLoading, setDetalleLoading] = useState(false);
+
   const NDAYS = daysInMonth(currentYear, currentMonth);
   const days = useMemo(
     () => Array.from({ length: NDAYS }, (_, i) => i + 1),
@@ -102,22 +150,12 @@ export default function CalendarioDemo() {
   );
 
   const monthNames = [
-    "Enero",
-    "Febrero",
-    "Marzo",
-    "Abril",
-    "Mayo",
-    "Junio",
-    "Julio",
-    "Agosto",
-    "Septiembre",
-    "Octubre",
-    "Noviembre",
-    "Diciembre",
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
   ];
   const weekDays = ["L", "M", "X", "J", "V", "S", "D"];
 
-  // Navegación estable: sumamos / restamos 1 mes a currentDate
+  // Navegación estable
   const prevMonth = () => {
     setCurrentDate((prev) => {
       const y = prev.getFullYear();
@@ -134,7 +172,7 @@ export default function CalendarioDemo() {
     });
   };
 
-  // ==== Carga de datos (availability / history) ====
+  // ==== Carga de datos SOLO RESERVAS ====
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -144,171 +182,56 @@ export default function CalendarioDemo() {
         const first = new Date(currentYear, currentMonth, 1);
         const last = new Date(currentYear, currentMonth, NDAYS);
 
-        const fmt = (d: Date) =>
-          `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
-            2,
-            "0"
-          )}-${String(d.getDate()).padStart(2, "0")}`;
-
         const startDate = fmt(first);
         const endDate = fmt(last);
 
-        // ================== MODO HISTÓRICO ==================
-        if (mode === "history") {
-          const res = await fetch(
-            `/api/cloudbeds/reservations?startDate=${startDate}&endDate=${endDate}`
-          );
-          const json: ApiResponse = await res.json();
-
-          if (!res.ok || !json.success) {
-            throw new Error(
-              json.message || "Error al obtener reservas de Cloudbeds"
-            );
-          }
-
-          const props = json.properties.filter((p) => p.success);
-
-          if (!props.length) {
-            // Si no llegan reservas, mostramos casas estáticas pero sin ocupación
-            const nuevasCasas = [
-              { id: "ALL", nombre: "Todas las casas", color: "bg-emerald-500" },
-              ...STATIC_PROPERTIES.map((p, i) => ({
-                id: p.id,
-                nombre: p.name,
-                color: COLOR_POOL[i % COLOR_POOL.length],
-              })),
-            ];
-            setCasas(nuevasCasas);
-            const vacio: Record<string, boolean[]> = {};
-            STATIC_PROPERTIES.forEach((p) => {
-              vacio[p.id] = Array.from({ length: NDAYS }, () => false);
-            });
-            setOcupacion(vacio);
-            if (seleccion !== "ALL") setSeleccion("ALL");
-            return;
-          }
-
-          const nuevasCasas: { id: string; nombre: string; color: string }[] = [
-            { id: "ALL", nombre: "Todas las casas", color: "bg-emerald-500" },
-          ];
-          const nuevaOcupacion: Record<string, boolean[]> = {};
-
-          props.forEach((p, index) => {
-            const color = COLOR_POOL[index % COLOR_POOL.length];
-            nuevasCasas.push({ id: p.id, nombre: p.name, color });
-
-            const arr = Array.from({ length: NDAYS }, () => false);
-
-            (p.reservations || []).forEach((r: any) => {
-              const startRaw =
-                r.startDate ||
-                r.checkIn ||
-                r.checkInDate ||
-                r.dateFrom ||
-                r.checkin_date;
-              const endRaw =
-                r.endDate ||
-                r.checkOut ||
-                r.checkOutDate ||
-                r.dateTo ||
-                r.checkout_date;
-
-              if (!startRaw || !endRaw) return;
-
-              const s = new Date(startRaw);
-              const e = new Date(endRaw);
-
-              for (let d = new Date(s); d < e; d.setDate(d.getDate() + 1)) {
-                if (
-                  d.getFullYear() === currentYear &&
-                  d.getMonth() === currentMonth
-                ) {
-                  const idx = d.getDate() - 1;
-                  if (idx >= 0 && idx < NDAYS) arr[idx] = true;
-                }
-              }
-            });
-
-            nuevaOcupacion[p.id] = arr;
-          });
-
-          setCasas(nuevasCasas);
-          setOcupacion(nuevaOcupacion);
-
-          if (
-            seleccion !== "ALL" &&
-            !nuevasCasas.find((c) => c.id === seleccion)
-          ) {
-            setSeleccion("ALL");
-          }
-
-          return;
-        }
-
-        // ================== MODO DISPONIBILIDAD ==================
         const res = await fetch(
-          `/api/cloudbeds/availability?startDate=${startDate}&endDate=${endDate}&adults=2`
+          `/api/cloudbeds/reservations?startDate=${startDate}&endDate=${endDate}`
         );
         const json: ApiResponse = await res.json();
 
         if (!res.ok || !json.success) {
-          throw new Error(
-            json.message || "Error al obtener disponibilidad de Cloudbeds"
-          );
+          throw new Error(json.message || "Error al obtener reservas de Cloudbeds");
         }
 
-        let props = json.properties.filter((p) => p.success);
-
-        // ⚠️ Caso noviembre / fechas mixtas o respuesta vacía:
-        // si Cloudbeds no devuelve nada, usamos las propiedades estáticas
-        if (!props.length) {
-          const nuevasCasas = [
-            { id: "ALL", nombre: "Todas las casas", color: "bg-emerald-500" },
-            ...STATIC_PROPERTIES.map((p, i) => ({
-              id: p.id,
-              nombre: p.name,
-              color: COLOR_POOL[i % COLOR_POOL.length],
-            })),
-          ];
-          setCasas(nuevasCasas);
-
-          const vacio: Record<string, boolean[]> = {};
-          STATIC_PROPERTIES.forEach((p) => {
-            vacio[p.id] = Array.from({ length: NDAYS }, () => false);
-          });
-          setOcupacion(vacio);
-
-          if (seleccion !== "ALL") setSeleccion("ALL");
-          return;
-        }
+        const props = mergeWithStatic(json.properties.filter((p) => p.success));
 
         const nuevasCasas: { id: string; nombre: string; color: string }[] = [
           { id: "ALL", nombre: "Todas las casas", color: "bg-emerald-500" },
         ];
         const nuevaOcupacion: Record<string, boolean[]> = {};
 
-        props.forEach((p, index) => {
-          const color = COLOR_POOL[index % COLOR_POOL.length];
+        props.forEach((p) => {
+          const color = colorForId(p.id);
           nuevasCasas.push({ id: p.id, nombre: p.name, color });
 
           const arr = Array.from({ length: NDAYS }, () => false);
 
-          const rooms =
-            p.data?.[0]?.propertyRooms && Array.isArray(p.data[0].propertyRooms)
-              ? p.data[0].propertyRooms
-              : [];
+          // Convertir fecha sin error de zona horaria
+          const toLocalDate = (raw: string) => {
+            const [y, m, d] = raw.split("-").map(Number);
+            return new Date(y, m - 1, d); // <-- fecha local sin desfase UTC
+          };
 
-          // Versión simplificada:
-          // Si hay al menos una habitación SIN disponibilidad -> marcamos mes ocupado (a pulso).
-          const algunSinDisponibilidad = rooms.some(
-            (r: any) =>
-              r.roomsAvailable !== undefined &&
-              Number(r.roomsAvailable) <= 0
-          );
+          (p.reservations || []).forEach((r: any) => {
+            const s = toLocalDate(r.startDate);
+            const e = toLocalDate(r.endDate);
 
-          arr.fill(algunSinDisponibilidad);
+            // recorremos: start incluido, end EXCLUIDO
+            for (let d = new Date(s); d < e; d.setDate(d.getDate() + 1)) {
+              if (
+                d.getFullYear() === currentYear &&
+                d.getMonth() === currentMonth
+              ) {
+                const idx = d.getDate() - 1;
+                if (idx >= 0 && idx < NDAYS) arr[idx] = true;
+              }
+            }
+          });
+
           nuevaOcupacion[p.id] = arr;
         });
+
 
         setCasas(nuevasCasas);
         setOcupacion(nuevaOcupacion);
@@ -328,9 +251,9 @@ export default function CalendarioDemo() {
     };
 
     fetchData();
-  }, [mode, currentYear, currentMonth, NDAYS, seleccion]);
+  }, [currentYear, currentMonth, NDAYS]); // sin seleccion para no recargar al filtrar
 
-  // ==== Helpers ====
+  // ==== Helpers UI / KPIs ====
   const casaOrder = useMemo(
     () => casas.filter((c) => c.id !== "ALL"),
     [casas]
@@ -381,6 +304,33 @@ export default function CalendarioDemo() {
       ? casaOrder
       : casaOrder.filter((c) => c.id === seleccion);
 
+  const isPastDate = (d: Date) => {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    return x < hoy;
+  };
+
+  // ===== Click día → modal con reservas =====
+  const onDayClick = async (date: Date) => {
+    if (date.getMonth() !== currentMonth) return;
+
+    setSelectedDay(date);
+    setDetalleLoading(true);
+    setDetalleDia(null);
+
+    const monthStart = fmt(new Date(currentYear, currentMonth, 1));
+    const monthEnd = fmt(new Date(currentYear, currentMonth, NDAYS));
+    const dayStr = fmt(date);
+
+    const res = await fetch(
+      `/api/cloudbeds/reservations-by-date?date=${dayStr}&monthStart=${monthStart}&monthEnd=${monthEnd}`
+    );
+    const json = await res.json();
+
+    setDetalleDia(json.properties || []);
+    setDetalleLoading(false);
+  };
+
   // ==== Render estados especiales ====
   if (loading) {
     return (
@@ -417,33 +367,18 @@ export default function CalendarioDemo() {
             </h1>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              className="border-emerald-500 text-emerald-600 text-sm"
-            >
+            <Button variant="outline" className="border-emerald-500 text-emerald-600 text-sm">
               {monthNames[currentMonth]} {currentYear}
             </Button>
+
             <button
-              onClick={() => setMode("availability")}
-              className={`text-xs px-3 py-1.5 rounded-full border ${
-                mode === "availability"
-                  ? "border-emerald-500 text-emerald-700 bg-emerald-50"
-                  : "border-gray-200 text-gray-500"
-              }`}
+              onClick={logout}
+              className="text-sm px-3 py-1.5 rounded-md border border-gray-200 bg-white hover:bg-gray-50"
             >
-              Disponibilidad
-            </button>
-            <button
-              onClick={() => setMode("history")}
-              className={`text-xs px-3 py-1.5 rounded-full border ${
-                mode === "history"
-                  ? "border-emerald-500 text-emerald-700 bg-emerald-50"
-                  : "border-gray-200 text-gray-500"
-              }`}
-            >
-              Histórico
+              Cerrar sesión
             </button>
           </div>
+
         </div>
 
         {/* Selector de casas */}
@@ -452,11 +387,10 @@ export default function CalendarioDemo() {
             <button
               key={c.id}
               onClick={() => setSeleccion(c.id)}
-              className={`text-sm px-3 py-1.5 rounded-full border transition ${
-                seleccion === c.id
-                  ? "border-emerald-500 text-emerald-700 bg-emerald-50"
-                  : "border-gray-200 text-gray-600 hover:border-gray-300"
-              }`}
+              className={`text-sm px-3 py-1.5 rounded-full border transition ${seleccion === c.id
+                ? "border-emerald-500 text-emerald-700 bg-emerald-50"
+                : "border-gray-200 text-gray-600 hover:border-gray-300"
+                }`}
             >
               {c.id === "ALL" ? "Todas" : c.nombre}
             </button>
@@ -473,9 +407,7 @@ export default function CalendarioDemo() {
             <span className="ml-2 text-xs text-gray-500">
               {seleccion === "ALL"
                 ? "· Todas las casas"
-                : `· ${
-                    casas.find((c) => c.id === seleccion)?.nombre || ""
-                  }`}
+                : `· ${casas.find((c) => c.id === seleccion)?.nombre || ""}`}
             </span>
           </div>
           <div className="flex gap-2">
@@ -516,14 +448,17 @@ export default function CalendarioDemo() {
                 const bookedSel =
                   seleccion !== "ALL" && isBooked(seleccion, date);
 
+                const past = isPastDate(date);
+
                 return (
                   <div
                     key={cIdx}
+                    onClick={() => onDayClick(date)}
                     className={[
-                      "h-20 rounded-md border p-1 relative text-xs",
+                      "h-20 rounded-md border p-1 relative text-xs cursor-pointer",
                       inMonth
                         ? "border-gray-200 bg-white"
-                        : "border-gray-100 bg-gray-50",
+                        : "border-gray-100 bg-gray-50 cursor-default",
                       bookedSel
                         ? "ring-2 ring-emerald-500 ring-offset-2"
                         : "",
@@ -531,9 +466,8 @@ export default function CalendarioDemo() {
                   >
                     {/* Número de día */}
                     <div
-                      className={`absolute top-1 left-1 text-[10px] ${
-                        inMonth ? "text-gray-500" : "text-gray-300"
-                      }`}
+                      className={`absolute top-1 left-1 text-[10px] ${inMonth ? "text-gray-500" : "text-gray-300"
+                        }`}
                     >
                       {date.getDate()}
                     </div>
@@ -548,11 +482,8 @@ export default function CalendarioDemo() {
                               return casaOrder.map((c) => (
                                 <div
                                   key={c.id}
-                                  className={`h-1.5 rounded ${
-                                    map[c.id]
-                                      ? c.color
-                                      : "bg-gray-100"
-                                  }`}
+                                  className={`h-1.5 rounded ${map[c.id] ? c.color : "bg-gray-100"
+                                    } ${map[c.id] && past ? "opacity-40" : ""}`}
                                 />
                               ));
                             })()}
@@ -560,15 +491,11 @@ export default function CalendarioDemo() {
                         ) : (
                           <div className="absolute bottom-1 left-1 right-1">
                             <div
-                              className={`h-2 rounded ${
-                                bookedSel
-                                  ? (
-                                      casaOrder.find(
-                                        (c) => c.id === seleccion
-                                      )?.color || "bg-emerald-500"
-                                    )
-                                  : "bg-gray-100"
-                              }`}
+                              className={`h-2 rounded ${bookedSel
+                                ? casaOrder.find((c) => c.id === seleccion)
+                                  ?.color || "bg-emerald-500"
+                                : "bg-gray-100"
+                                } ${bookedSel && past ? "opacity-40" : ""}`}
                             />
                           </div>
                         )}
@@ -604,9 +531,7 @@ export default function CalendarioDemo() {
               className="rounded-xl border border-gray-200 bg-white p-3"
             >
               <div className="text-xs text-gray-500">{c.nombre}</div>
-              <div className="text-xl font-semibold text-gray-800">
-                {occ}%
-              </div>
+              <div className="text-xl font-semibold text-gray-800">{occ}%</div>
               <div className="text-[11px] text-gray-400">
                 {kpis[c.id] || 0}/{totalDiasMes} noches
               </div>
@@ -619,9 +544,7 @@ export default function CalendarioDemo() {
       <Card className="w-full max-w-6xl border border-gray-200">
         <CardContent className="p-4">
           <div className="grid grid-cols-[160px_1fr] items-end">
-            <div className="text-xs font-medium text-gray-500">
-              Propiedad
-            </div>
+            <div className="text-xs font-medium text-gray-500">Propiedad</div>
             <div
               className="grid gap-0.5"
               style={{
@@ -661,12 +584,14 @@ export default function CalendarioDemo() {
                 >
                   {days.map((d) => {
                     const occ = ocupacion[r.id]?.[d - 1];
+                    const cellDate = new Date(currentYear, currentMonth, d);
+                    const past = isPastDate(cellDate);
+
                     return (
                       <div
                         key={d}
-                        className={`h-6 rounded-sm ${
-                          occ ? r.color : "bg-gray-100"
-                        }`}
+                        className={`h-6 rounded-sm ${occ ? r.color : "bg-gray-100"
+                          } ${occ && past ? "opacity-40" : ""}`}
                       />
                     );
                   })}
@@ -690,6 +615,64 @@ export default function CalendarioDemo() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ===== Modal detalle día ===== */}
+      {selectedDay && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="w-full max-w-lg bg-white rounded-xl p-4 border">
+            <div className="flex justify-between items-center mb-2">
+              <div className="font-semibold text-gray-800">
+                Habitaciones ocupadas · {fmt(selectedDay)}
+              </div>
+              <button
+                onClick={() => {
+                  setSelectedDay(null);
+                  setDetalleDia(null);
+                }}
+                className="text-sm text-gray-500 hover:text-gray-800"
+              >
+                Cerrar
+              </button>
+            </div>
+
+            {detalleLoading && (
+              <div className="text-sm text-gray-500">Cargando...</div>
+            )}
+
+            {!detalleLoading &&
+              detalleDia &&
+              detalleDia.map((p) => (
+                <div key={p.id} className="mb-3">
+                  <div className="font-medium text-gray-700">{p.name}</div>
+
+                  {p.reservations.length === 0 ? (
+                    <div className="text-sm text-gray-400">
+                      Sin reservas.
+                    </div>
+                  ) : (
+                    <ul className="text-sm mt-1 space-y-1">
+                      {p.reservations.map((r: any) => (
+                        <li
+                          key={r.reservationID}
+                          className="border rounded-md p-2"
+                        >
+                          <div>Reserva: {r.reservationID}</div>
+                          <div>Huésped: {r.guestName}</div>
+                          <div className="text-[11px] text-gray-500">
+                            {r.startDate} → {r.endDate}
+                          </div>
+                          <div className="text-[11px] text-amber-600">
+                            (Puede no tener cuarto asignado aún)
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
