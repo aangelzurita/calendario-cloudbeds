@@ -3,18 +3,25 @@ import { getCloudbedsAccessToken } from "@/lib/cloudbedsAuth";
 
 const CLOUDBEDS_API = "https://api.cloudbeds.com/api/v1.3";
 
-// Nombres de casas
+// === Nombres amigables ===
 const PROPERTY_NAMES = {
   lapunta: "Aguamiel La Punta",
   aguablanca: "Aguamiel Agua Blanca",
   esmeralda: "Aguamiel Esmeralda",
+  manzanillo: "Aguamiel Manzanillo",
 } as const;
 
-const PROPERTY_IDS = ["lapunta", "aguablanca", "esmeralda"] as const;
+// === Lista de propiedades que deben consultarse ===
+const PROPERTY_IDS = [
+  "lapunta",
+  "aguablanca",
+  "esmeralda",
+  "manzanillo",
+] as const;
 
-// ===== Cache en memoria (simple) =====
+// ===== Cache simple en memoria =====
 type CacheEntry<T> = { ts: number; data: T };
-const CACHE_TTL_MS = 1000 * 60 * 2; // 2 minutos
+const CACHE_TTL_MS = 1000 * 60 * 2; // 2 min
 
 const globalCache =
   (globalThis as any).__cloudbedsCache ||
@@ -34,7 +41,10 @@ function setCache<T>(key: string, data: T) {
   globalCache.set(key, { ts: Date.now(), data });
 }
 
-// ====== GET ======
+// =========================================================
+// ===============      GET RESERVATIONS     ===============
+// =========================================================
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
@@ -48,16 +58,16 @@ export async function GET(req: Request) {
     );
   }
 
-  // ✅ (B2.1) Creamos la key del cache
+  // ====== CACHE KEY ======
   const cacheKey = `reservations:${startDate}:${endDate}`;
 
-  // ✅ (B2.2) Revisamos si ya existe en cache
+  // ====== CHECK CACHE ======
   const cached = getCache<any>(cacheKey);
   if (cached) {
     return NextResponse.json(cached, { status: 200 });
   }
 
-  // ✅ Si no hay cache, ahora sí pegamos a Cloudbeds
+  // ====== FETCH DE TODAS LAS PROPIEDADES ======
   const results = await Promise.all(
     PROPERTY_IDS.map(async (pid) => {
       try {
@@ -90,13 +100,13 @@ export async function GET(req: Request) {
     })
   );
 
-  // ✅ (B2.3) Armamos el payload final
+  // ====== PAYLOAD FINAL ======
   const payload = {
     success: true,
     properties: results,
   };
 
-  // ✅ (B2.4) Guardamos en cache antes de responder
+  // ====== GUARDAR EN CACHE ======
   setCache(cacheKey, payload);
 
   return NextResponse.json(payload, { status: 200 });

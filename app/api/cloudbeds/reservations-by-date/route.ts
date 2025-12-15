@@ -7,9 +7,10 @@ const PROPERTY_NAMES = {
     lapunta: "Aguamiel La Punta",
     aguablanca: "Aguamiel Agua Blanca",
     esmeralda: "Aguamiel Esmeralda",
+    manzanillo: "Aguamiel Manzanillo",
 } as const;
 
-const PROPERTY_IDS = ["lapunta", "aguablanca", "esmeralda"] as const;
+const PROPERTY_IDS = ["lapunta", "aguablanca", "esmeralda", "manzanillo"] as const;
 
 export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);

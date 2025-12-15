@@ -5,21 +5,26 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CalendarDays, Home } from "lucide-react";
 
-// Paleta de colores para las casas
+const SHOW_ROOM_LEVEL =
+  process.env.NEXT_PUBLIC_SHOW_ROOM_LEVEL === "true";
+
+// Paleta de colores para cada casa (orden fijo)
 const COLOR_POOL = [
-  "bg-emerald-500",
-  "bg-blue-500",
-  "bg-amber-500",
-  "bg-pink-500",
-  "bg-purple-500",
+  "bg-emerald-500", // La Punta
+  "bg-blue-500",    // Agua Blanca
+  "bg-amber-500",   // Esmeralda
+  "bg-pink-500",    // Manzanillo
 ];
 
-// Lista estática de propiedades (asegura que siempre aparezcan)
+// Lista estática de propiedades (ahora con Manzanillo)
 const STATIC_PROPERTIES = [
   { id: "lapunta", name: "Aguamiel La Punta" },
   { id: "aguablanca", name: "Aguamiel Agua Blanca" },
   { id: "esmeralda", name: "Aguamiel Esmeralda" },
+  { id: "manzanillo", name: "Aguamiel Manzanillo" }, // 👈 NUEVO
 ];
+
+
 
 type AvailabilityProperty = {
   id: string;
@@ -134,6 +139,13 @@ export default function CalendarioDemo() {
   // Ocupación: propertyId -> [bool por día]
   const [ocupacion, setOcupacion] = useState<Record<string, boolean[]>>({});
 
+  // ➕ NUEVO: roomTypes por propiedad
+  type RoomTypeInfo = { roomTypeID: string; name: string; occupied: boolean };
+
+  const [roomTypesByProperty, setRoomTypesByProperty] = useState<
+    Record<string, RoomTypeInfo[]>
+  >({});
+
   // ===== Modal detalle =====
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
   const [detalleDia, setDetalleDia] = useState<any[] | null>(null);
@@ -172,7 +184,7 @@ export default function CalendarioDemo() {
     });
   };
 
-  // ==== Carga de datos SOLO RESERVAS ====
+  // ==== Carga de datos SOLO RESERVAS + ROOMTYPES ====
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -185,6 +197,7 @@ export default function CalendarioDemo() {
         const startDate = fmt(first);
         const endDate = fmt(last);
 
+        // 1) Traer reservas por propiedad
         const res = await fetch(
           `/api/cloudbeds/reservations?startDate=${startDate}&endDate=${endDate}`
         );
@@ -232,7 +245,6 @@ export default function CalendarioDemo() {
           nuevaOcupacion[p.id] = arr;
         });
 
-
         setCasas(nuevasCasas);
         setOcupacion(nuevaOcupacion);
 
@@ -242,6 +254,30 @@ export default function CalendarioDemo() {
         ) {
           setSeleccion("ALL");
         }
+
+        // 2) ➕ NUEVO: traer roomTypes (disponibilidad por habitación) para cada propiedad
+        const midMonth = fmt(new Date(currentYear, currentMonth, 15)); // cualquier día del mes sirve
+        const updatedRoomTypes: Record<string, RoomTypeInfo[]> = {};
+
+        for (const p of props) {
+          try {
+            const resRooms = await fetch(
+              `/api/cloudbeds/room-availability?property=${p.id}&date=${midMonth}`
+            );
+            const jsonRooms = await resRooms.json();
+
+            if (jsonRooms.success && Array.isArray(jsonRooms.rooms)) {
+              updatedRoomTypes[p.id] = jsonRooms.rooms;
+            } else {
+              updatedRoomTypes[p.id] = [];
+            }
+          } catch (e) {
+            updatedRoomTypes[p.id] = [];
+          }
+        }
+
+        setRoomTypesByProperty(updatedRoomTypes);
+
       } catch (err: any) {
         console.error(err);
         setError(err.message || "Error desconocido");
@@ -251,7 +287,7 @@ export default function CalendarioDemo() {
     };
 
     fetchData();
-  }, [currentYear, currentMonth, NDAYS]); // sin seleccion para no recargar al filtrar
+  }, [currentYear, currentMonth, NDAYS]); // sin 'seleccion' para no recargar al filtrar
 
   // ==== Helpers UI / KPIs ====
   const casaOrder = useMemo(
@@ -539,6 +575,55 @@ export default function CalendarioDemo() {
           );
         })}
       </div>
+      {/* === Disponibilidad por habitación (roomTypes) === */}
+      {SHOW_ROOM_LEVEL && seleccion !== "ALL" && (
+        <Card className="w-full max-w-6xl border border-gray-200">
+          <CardContent className="p-4">
+            <h2 className="text-lg font-semibold text-gray-700 mb-3">
+              Disponibilidad por habitación ·{" "}
+              {casas.find((c) => c.id === seleccion)?.nombre}
+            </h2>
+
+            {!roomTypesByProperty[seleccion] && (
+              <div className="text-sm text-gray-500">
+                Cargando habitaciones...
+              </div>
+            )}
+
+            {roomTypesByProperty[seleccion] &&
+              roomTypesByProperty[seleccion].length === 0 && (
+                <div className="text-sm text-gray-400">
+                  No hay información disponible para esta propiedad.
+                </div>
+              )}
+
+            {roomTypesByProperty[seleccion] &&
+              roomTypesByProperty[seleccion].length > 0 && (
+                <div className="space-y-2">
+                  {roomTypesByProperty[seleccion].map((rt) => (
+                    <div
+                      key={rt.roomTypeID}
+                      className="flex justify-between items-center border-b last:border-b-0 py-2"
+                    >
+                      <div className="font-medium text-gray-800">
+                        {rt.name}
+                      </div>
+                      <div
+                        className={`px-3 py-1 rounded-full text-xs font-semibold ${rt.occupied
+                            ? "bg-red-100 text-red-700"
+                            : "bg-green-100 text-green-700"
+                          }`}
+                      >
+                        {rt.occupied ? "Ocupada" : "Disponible"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+          </CardContent>
+        </Card>
+      )}
+
 
       {/* Vista lineal */}
       <Card className="w-full max-w-6xl border border-gray-200">

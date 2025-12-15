@@ -7,6 +7,7 @@ const PROPERTY_NAMES = {
   lapunta: "Aguamiel La Punta",
   aguablanca: "Aguamiel Agua Blanca",
   esmeralda: "Aguamiel Esmeralda",
+  manzanillo: "Aguamiel Manzanillo", // 👈 nuevo!
 } as const;
 
 type PropertyId = keyof typeof PROPERTY_NAMES;
@@ -53,8 +54,6 @@ async function mapLimit<T, R>(
 }
 
 // ====== cache simple en memoria ======
-// OJO: funciona perfecto en dev y en servidores únicos.
-// En Vercel multi-instancia se comporta como “best effort”.
 const CACHE = new Map<string, { expires: number; payload: any }>();
 const TTL_MS = 1000 * 60 * 10; // 10 min
 
@@ -64,7 +63,7 @@ export async function GET(req: Request) {
   const startDateStr = searchParams.get("startDate");
   const endDateStr = searchParams.get("endDate");
   const adults = searchParams.get("adults") || "2";
-  const stayNights = Number(searchParams.get("nights") || "2"); // por si luego quieres ajustar
+  const stayNights = Number(searchParams.get("nights") || "2");
 
   if (!startDateStr || !endDateStr) {
     return NextResponse.json(
@@ -73,7 +72,7 @@ export async function GET(req: Request) {
     );
   }
 
-  // ====== cache key por mes + adultos + noches ======
+  // ====== cache key ======
   const cacheKey = `${startDateStr}_${endDateStr}_a${adults}_n${stayNights}`;
   const cached = CACHE.get(cacheKey);
   const now = Date.now();
@@ -88,24 +87,22 @@ export async function GET(req: Request) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // solo días futuros se consultan
   const futureDays = dayList.filter((d) => {
     const x = new Date(d);
     x.setHours(0, 0, 0, 0);
     return x > today;
   });
 
-  const propertyIds: PropertyId[] = ["lapunta", "aguablanca", "esmeralda"];
+  // 👈 AGREGAMOS MANZANILLO
+  const propertyIds: PropertyId[] = ["lapunta", "aguablanca", "esmeralda", "manzanillo"];
 
   const results = await Promise.all(
     propertyIds.map(async (pid) => {
       try {
         const token = await getCloudbedsAccessToken(pid);
 
-        // inicializa todo vendible
         const availabilityByDay: boolean[] = Array(dayList.length).fill(true);
 
-        // si no hay futuros, no consultamos nada
         if (futureDays.length === 0) {
           return {
             id: pid,
@@ -116,10 +113,9 @@ export async function GET(req: Request) {
           };
         }
 
-        // hacemos consultas futuras con concurrencia controlada
         const futureResults = await mapLimit(
           futureDays,
-          5, // 👈 5 requests simultáneos por propiedad (ajustable)
+          5,
           async (day) => {
             const sd = fmt(day);
             const ed = fmt(addDays(day, stayNights));
@@ -131,7 +127,7 @@ export async function GET(req: Request) {
             const json = await res.json();
 
             if (!json.success || !json.data?.[0]?.propertyRooms) {
-              return { day, vendible: true }; // fallback SAFE
+              return { day, vendible: true };
             }
 
             const rooms = json.data[0].propertyRooms;
@@ -145,10 +141,10 @@ export async function GET(req: Request) {
           }
         );
 
-        // mete resultados futuros en el array general
         futureResults.forEach(({ day, vendible }) => {
           const idx = Math.floor(
-            (new Date(day).getTime() - start.getTime()) / (1000 * 60 * 60 * 24)
+            (new Date(day).getTime() - start.getTime()) /
+            (1000 * 60 * 60 * 24)
           );
           if (idx >= 0 && idx < availabilityByDay.length) {
             availabilityByDay[idx] = vendible;
